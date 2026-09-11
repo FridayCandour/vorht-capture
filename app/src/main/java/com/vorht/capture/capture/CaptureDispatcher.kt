@@ -5,6 +5,7 @@ import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import com.vorht.capture.net.CarlaDelivery
+import com.vorht.capture.util.VorhtLogger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -14,13 +15,12 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Ephemeral realtime delivery dispatcher:
  *  - Captures notifications immediately
- *  - Holds a scoped WakeLock so CPU does not sleep during background delivery
+ *  - Synchronously acquires a scoped WakeLock so CPU does not sleep before coroutine execution
  *  - Attempts HTTP POST immediately
  *  - Retries with rapid backoff within a 30-second freshness window while app process is alive
  *  - Discards events when 30s TTL expires
@@ -46,19 +46,26 @@ object CaptureDispatcher {
     private val seenEvents = ConcurrentHashMap<String, Long>()
 
     fun init(context: Context) {
-        powerManager = context.applicationContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        if (powerManager == null) {
+            powerManager = context.applicationContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        }
     }
 
     /**
      * Dispatch captured notification content for immediate delivery.
+     * Synchronously acquires a partial wake lock before returning to prevent CPU sleep.
      */
     fun forward(
+        context: Context,
+        eventId: String,
         key: String,
         sender: String,
         message: String,
         code: String?,
         detectedAt: Long,
     ) {
+        init(context)
+
         val now = SystemClock.elapsedRealtime()
         cleanupSeen(now)
 
@@ -69,19 +76,27 @@ object CaptureDispatcher {
             return
         }
 
-        val eventId = UUID.randomUUID().toString()
+        // CRITICAL: Synchronously acquire wake lock BEFORE onNotificationPosted returns,
+        // so Android OS cannot put CPU to sleep before the coroutine is scheduled.
+        val wakeLock = try {
+            powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "vorht:delivery:$eventId")?.apply {
+                setReferenceCounted(false)
+                acquire(35_000L) // Capped safety window
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "WakeLock acquisition failed: ${e.message}")
+            null
+        }
+
         _pending.update { it + 1 }
 
         scope.launch {
-            val wakeLock = try {
-                powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "vorht:delivery:$eventId")?.apply {
-                    setReferenceCounted(false)
-                    acquire(35_000L) // Capped safety window
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "WakeLock acquisition failed: ${e.message}")
-                null
-            }
+            VorhtLogger.log(
+                "DISPATCH_STARTED",
+                eventId = eventId,
+                notificationKey = key,
+                details = "sender=\"$sender\"",
+            )
 
             val deadline = SystemClock.elapsedRealtime() + DELIVERY_WINDOW_MS
             var attempt = 0
@@ -103,14 +118,28 @@ object CaptureDispatcher {
 
                     val timeoutMs = minOf(remaining, 10_000L)
 
-                    val success = CarlaDelivery.send(
+                    VorhtLogger.log(
+                        "HTTP_ATTEMPT",
+                        eventId = eventId,
+                        notificationKey = key,
+                        details = "attempt=$attempt timeoutMs=$timeoutMs remainingMs=$remaining",
+                    )
+
+                    val result = CarlaDelivery.send(
                         project = sender,
                         message = formattedMessage,
                         eventId = eventId,
                         timeoutMs = timeoutMs,
                     )
 
-                    if (success) {
+                    VorhtLogger.log(
+                        "HTTP_RESULT",
+                        eventId = eventId,
+                        notificationKey = key,
+                        details = "attempt=$attempt status=${result.statusCode ?: "none"} success=${result.isSuccess} durationMs=${result.durationMs} error=\"${result.errorMessage ?: "none"}\"",
+                    )
+
+                    if (result.isSuccess) {
                         delivered = true
                         break
                     }
@@ -133,9 +162,19 @@ object CaptureDispatcher {
 
                 if (delivered) {
                     _forwarded.update { it + 1 }
-                    Log.i(TAG, "Delivered event $eventId in $attempt attempt(s)")
+                    VorhtLogger.log(
+                        "DISPATCH_FINISHED",
+                        eventId = eventId,
+                        notificationKey = key,
+                        details = "attempts=$attempt",
+                    )
                 } else {
-                    Log.w(TAG, "Discarded event $eventId: 30s TTL expired after $attempt attempt(s)")
+                    VorhtLogger.log(
+                        "TTL_EXPIRED",
+                        eventId = eventId,
+                        notificationKey = key,
+                        details = "attempts=$attempt action=DISCARD",
+                    )
                 }
             }
         }

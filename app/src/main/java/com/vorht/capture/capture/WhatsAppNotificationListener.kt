@@ -16,25 +16,29 @@ import android.util.Log
 import com.vorht.capture.MainActivity
 import com.vorht.capture.R
 import com.vorht.capture.util.CrashReporter
+import com.vorht.capture.util.VorhtLogger
+import java.util.UUID
 
 /**
- * Watches WhatsApp notifications ONLY (`com.whatsapp`) and hands every message
- * to CaptureDispatcher for immediate delivery with 30-second TTL.
- *
- * Runs as a foreground service so Android and OEM ROMs (e.g. MagicOS) do not
- * freeze the process or restrict background sockets while the screen is locked.
+ * Authoritative background entry point for WhatsApp notifications.
+ * Operates independently of MainActivity and UI lifecycles.
  */
 class WhatsAppNotificationListener : NotificationListenerService() {
 
     override fun onListenerConnected() {
-        Log.i(TAG, "Notification listener connected — promoting to foreground")
+        super.onListenerConnected()
+        VorhtLogger.log("LISTENER_CONNECTED", details = "capture is live")
         CrashReporter.report("listener CONNECTED — capture is live")
+        CaptureDispatcher.init(applicationContext)
         goForeground()
     }
 
     override fun onListenerDisconnected() {
-        Log.w(TAG, "Listener disconnected — requesting rebind")
+        super.onListenerDisconnected()
+        VorhtLogger.log("LISTENER_DISCONNECTED", details = "system unbound listener")
         CrashReporter.report("listener DISCONNECTED — attempting rebind now")
+
+        VorhtLogger.log("REBIND_REQUESTED", details = "requesting rebind")
         try {
             requestRebind(ComponentName(this, WhatsAppNotificationListener::class.java))
         } catch (e: Exception) {
@@ -57,15 +61,33 @@ class WhatsAppNotificationListener : NotificationListenerService() {
         if (texts.isEmpty()) return
 
         val key = sbn.key ?: "${sbn.packageName}|${sbn.id}"
+        VorhtLogger.log(
+            "CAPTURE_RECEIVED",
+            notificationKey = key,
+            details = "sender=\"$sender\" textCount=${texts.size} postTime=${sbn.postTime}",
+        )
+
         for (text in texts) {
             // Skip progress-style/percentage-only strings.
             if (text.contains("%") && !text.any { it.isLetterOrDigit() && it != '%' }) continue
 
+            val code = CodeParser.parse(text)
+            val eventId = UUID.randomUUID().toString()
+
+            VorhtLogger.log(
+                "CAPTURE_PARSED",
+                eventId = eventId,
+                notificationKey = key,
+                details = "code=${code ?: "none"} textLength=${text.length}",
+            )
+
             CaptureDispatcher.forward(
+                context = applicationContext,
+                eventId = eventId,
                 key = key,
                 sender = sender,
                 message = text,
-                code = CodeParser.parse(text),
+                code = code,
                 detectedAt = sbn.postTime,
             )
         }

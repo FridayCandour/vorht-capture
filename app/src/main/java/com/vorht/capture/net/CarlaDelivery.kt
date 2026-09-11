@@ -1,5 +1,6 @@
 package com.vorht.capture.net
 
+import android.os.SystemClock
 import com.google.gson.Gson
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
@@ -17,6 +18,13 @@ import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
+
+data class DeliveryResult(
+    val isSuccess: Boolean,
+    val statusCode: Int? = null,
+    val errorMessage: String? = null,
+    val durationMs: Long = 0L,
+)
 
 /**
  * Delivers captured WhatsApp details to the team chat via the carla relay:
@@ -70,10 +78,14 @@ object CarlaDelivery {
         message: String,
         eventId: String,
         timeoutMs: Long,
-    ): Boolean {
-        if (timeoutMs <= 0L) return false
+    ): DeliveryResult {
+        if (timeoutMs <= 0L) {
+            return DeliveryResult(isSuccess = false, errorMessage = "TimeoutMs <= 0")
+        }
 
-        return withTimeoutOrNull(timeoutMs) {
+        val start = SystemClock.elapsedRealtime()
+
+        val result = withTimeoutOrNull(timeoutMs) {
             suspendCancellableCoroutine { continuation ->
                 val payload = gson.toJson(
                     mapOf(
@@ -95,20 +107,40 @@ object CarlaDelivery {
                 call.enqueue(object : Callback {
                     override fun onResponse(call: Call, response: Response) {
                         response.use {
+                            val duration = SystemClock.elapsedRealtime() - start
                             val success = response.isSuccessful || response.code == 409
                             if (continuation.isActive) {
-                                continuation.resume(success)
+                                continuation.resume(
+                                    DeliveryResult(
+                                        isSuccess = success,
+                                        statusCode = response.code,
+                                        durationMs = duration,
+                                    )
+                                )
                             }
                         }
                     }
 
                     override fun onFailure(call: Call, e: IOException) {
+                        val duration = SystemClock.elapsedRealtime() - start
                         if (continuation.isActive) {
-                            continuation.resume(false)
+                            continuation.resume(
+                                DeliveryResult(
+                                    isSuccess = false,
+                                    errorMessage = e.message ?: e.javaClass.simpleName,
+                                    durationMs = duration,
+                                )
+                            )
                         }
                     }
                 })
             }
-        } ?: false
+        }
+
+        return result ?: DeliveryResult(
+            isSuccess = false,
+            errorMessage = "Timed out after ${timeoutMs}ms",
+            durationMs = SystemClock.elapsedRealtime() - start,
+        )
     }
 }
