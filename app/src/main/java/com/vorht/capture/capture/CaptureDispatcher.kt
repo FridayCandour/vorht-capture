@@ -130,7 +130,6 @@ object CaptureDispatcher {
                     )
 
                     val result = CarlaDelivery.send(
-                        project = sender,
                         message = formattedMessage,
                         eventId = eventId,
                         timeoutMs = timeoutMs,

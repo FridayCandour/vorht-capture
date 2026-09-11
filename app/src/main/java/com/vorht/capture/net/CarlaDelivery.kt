@@ -65,7 +65,6 @@ object CarlaDelivery {
      * without delegating to OkHttp's asynchronous thread pool which can be throttled in sleep.
      */
     fun send(
-        project: String,
         message: String,
         eventId: String,
         timeoutMs: Long,
@@ -77,7 +76,6 @@ object CarlaDelivery {
         val start = SystemClock.elapsedRealtime()
         val payload = gson.toJson(
             mapOf(
-                "project" to project.take(120),
                 "message" to message.take(3500),
             )
         )
@@ -113,4 +111,11 @@ object CarlaDelivery {
             )
         }
     }
+
+    fun send(
+        project: String?,
+        message: String,
+        eventId: String,
+        timeoutMs: Long,
+    ): DeliveryResult = send(message = message, eventId = eventId, timeoutMs = timeoutMs)
 }
