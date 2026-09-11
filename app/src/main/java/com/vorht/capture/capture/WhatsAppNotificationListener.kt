@@ -50,7 +50,7 @@ class WhatsAppNotificationListener : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         val pkg = sbn.packageName
-        if (pkg != WHATSAPP_PACKAGE && pkg != applicationContext.packageName) return
+        if (pkg != WHATSAPP_PACKAGE && pkg != applicationContext.packageName && sbn.tag != "vorht_test") return
 
         val notification = sbn.notification ?: return
         val key = sbn.key ?: "${pkg}|${sbn.id}"
