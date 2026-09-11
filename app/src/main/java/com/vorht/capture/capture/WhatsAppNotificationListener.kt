@@ -20,6 +20,7 @@ import com.vorht.capture.util.VorhtLogger
 import java.util.UUID
 
 import android.os.PowerManager
+import android.provider.Telephony
 import androidx.core.app.NotificationCompat
 
 /**
@@ -58,10 +59,10 @@ class WhatsAppNotificationListener : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        val pkg = sbn.packageName
-        if (pkg != WHATSAPP_PACKAGE && pkg != applicationContext.packageName && sbn.tag != "vorht_test") return
-
         val notification = sbn.notification ?: return
+        if (!isTargetNotification(sbn, notification)) return
+
+        val pkg = sbn.packageName
         val key = sbn.key ?: "${pkg}|${sbn.id}"
         val isOngoing = notification.flags and Notification.FLAG_ONGOING_EVENT != 0
         val isGroupSummary = notification.flags and Notification.FLAG_GROUP_SUMMARY != 0
@@ -69,7 +70,7 @@ class WhatsAppNotificationListener : NotificationListenerService() {
         VorhtLogger.log(
             "NOTIFICATION_POSTED",
             notificationKey = key,
-            details = "pkg=$pkg id=${sbn.id} flags=0x${Integer.toHexString(notification.flags)} ongoing=$isOngoing groupSummary=$isGroupSummary postTime=${sbn.postTime}",
+            details = "pkg=$pkg id=${sbn.id} flags=0x${Integer.toHexString(notification.flags)} category=${notification.category} ongoing=$isOngoing groupSummary=$isGroupSummary postTime=${sbn.postTime}",
         )
 
         // Ongoing notifications are progress bars / uploads / active calls, never incoming messages.
@@ -91,6 +92,12 @@ class WhatsAppNotificationListener : NotificationListenerService() {
             details = "messageCount=${messages.size} groupSummary=$isGroupSummary",
         )
 
+        val source = when {
+            pkg.contains("whatsapp") -> "whatsapp"
+            pkg.contains("messaging") || pkg.contains("mms") || pkg.contains("sms") -> "sms"
+            else -> pkg
+        }
+
         for (item in messages) {
             val code = CodeParser.parse(item.text)
             val eventId = UUID.randomUUID().toString()
@@ -99,7 +106,7 @@ class WhatsAppNotificationListener : NotificationListenerService() {
                 "CAPTURE_PARSED",
                 eventId = eventId,
                 notificationKey = key,
-                details = "sender=\"${item.sender}\" code=${code ?: "none"} textLength=${item.text.length}",
+                details = "source=$source sender=\"${item.sender}\" code=${code ?: "none"} textLength=${item.text.length}",
             )
 
             CaptureDispatcher.forward(
@@ -110,8 +117,33 @@ class WhatsAppNotificationListener : NotificationListenerService() {
                 message = item.text,
                 code = code,
                 detectedAt = item.timestamp,
+                source = source,
             )
         }
+    }
+
+    private fun isTargetNotification(sbn: StatusBarNotification, notification: Notification): Boolean {
+        val pkg = sbn.packageName
+
+        // 1. Internal self-tests / diagnostics
+        if (pkg == applicationContext.packageName || sbn.tag == "vorht_test") return true
+
+        // 2. Known messaging & SMS packages
+        if (TARGET_PACKAGES.contains(pkg)) return true
+
+        // 3. Current default SMS app on device
+        try {
+            val defaultSms = Telephony.Sms.getDefaultSmsPackage(this)
+            if (!defaultSms.isNullOrBlank() && defaultSms == pkg) return true
+        } catch (_: Exception) {}
+
+        // 4. Any package whose name indicates messaging or SMS/MMS
+        if (pkg.contains("messaging") || pkg.contains(".mms") || pkg.contains(".sms")) return true
+
+        // 5. Standard Android notification category for direct incoming messages
+        if (notification.category == Notification.CATEGORY_MESSAGE) return true
+
+        return false
     }
 
     private fun goForeground() {
@@ -123,7 +155,7 @@ class WhatsAppNotificationListener : NotificationListenerService() {
                     "Vorht Capture Service",
                     NotificationManager.IMPORTANCE_LOW
                 ).apply {
-                    description = "Maintains real-time background capture of WhatsApp verification codes"
+                    description = "Maintains real-time background capture of SMS and WhatsApp verification codes"
                     setShowBadge(false)
                 }
                 manager.createNotificationChannel(channel)
@@ -136,7 +168,7 @@ class WhatsAppNotificationListener : NotificationListenerService() {
             val notification = Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_launcher_foreground)
                 .setContentTitle("Vorht Capture")
-                .setContentText("Active — listening for WhatsApp verification codes")
+                .setContentText("Active — listening for SMS & WhatsApp verification codes")
                 .setContentIntent(openApp)
                 .setOngoing(true)
                 .build()
@@ -182,29 +214,54 @@ class WhatsAppNotificationListener : NotificationListenerService() {
     }
 
     /**
-     * Extracts individual messages from WhatsApp notifications using all available styles.
+     * Resolves an appropriate human-readable sender title for the notification.
+     * Uses EXTRA_TITLE_BIG, EXTRA_TITLE, or the application label (e.g. "Messages", "WhatsApp").
+     */
+    private fun resolveDefaultSender(extras: Bundle, pkg: String): String {
+        val title = extras.getCharSequence(Notification.EXTRA_TITLE_BIG)?.toString()?.trim()?.takeIf { it.isNotBlank() }
+            ?: extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim()?.takeIf { it.isNotBlank() }
+        if (title != null) return title
+
+        return try {
+            val pm = packageManager
+            val info = pm.getApplicationInfo(pkg, 0)
+            pm.getApplicationLabel(info).toString()
+        } catch (_: Exception) {
+            when {
+                pkg.contains("whatsapp") -> "WhatsApp"
+                pkg.contains("messaging") || pkg.contains("mms") || pkg.contains("sms") -> "SMS"
+                else -> "Message"
+            }
+        }
+    }
+
+    /**
+     * Extracts individual messages from notifications using all available styles.
      * Order of precedence:
-     * 1. NotificationCompat.MessagingStyle (standard modern WhatsApp format)
+     * 1. NotificationCompat.MessagingStyle (standard modern SMS and WhatsApp format)
      * 2. Framework Notification.EXTRA_MESSAGES bundle array
      * 3. InboxStyle EXTRA_TEXT_LINES (stacked group notifications)
-     * 4. EXTRA_BIG_TEXT
-     * 5. EXTRA_TEXT
+     * 4. EXTRA_BIG_TEXT (expanded single message)
+     * 5. EXTRA_TEXT (collapsed single message)
      */
     private fun extractMessages(notification: Notification, sbn: StatusBarNotification): List<CapturedMessage> {
         val extras = notification.extras ?: return emptyList()
-        val defaultSender = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim()
-            ?.takeIf { it.isNotBlank() } ?: "WhatsApp"
+        val pkg = sbn.packageName
+        val defaultSender = resolveDefaultSender(extras, pkg)
 
         val results = mutableListOf<CapturedMessage>()
 
-        // 1. AndroidX NotificationCompat.MessagingStyle
+        // 1. AndroidX NotificationCompat.MessagingStyle (Google Messages, WhatsApp, Signal)
         try {
             val messagingStyle = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(notification)
             if (messagingStyle != null && messagingStyle.messages.isNotEmpty()) {
+                val conversationTitle = messagingStyle.conversationTitle?.toString()?.trim()?.takeIf { it.isNotBlank() }
                 for (msg in messagingStyle.messages) {
                     val text = msg.text?.toString()?.trim() ?: continue
                     if (text.isBlank() || isSummaryOrNoise(text)) continue
-                    val sender = msg.person?.name?.toString()?.trim()?.takeIf { it.isNotBlank() } ?: defaultSender
+                    val sender = msg.person?.name?.toString()?.trim()?.takeIf { it.isNotBlank() }
+                        ?: conversationTitle
+                        ?: defaultSender
                     val time = if (msg.timestamp > 0L) msg.timestamp else sbn.postTime
                     results.add(CapturedMessage(sender = sender, text = text, timestamp = time))
                 }
@@ -258,17 +315,19 @@ class WhatsAppNotificationListener : NotificationListenerService() {
             }
         }
 
-        // 4. EXTRA_BIG_TEXT
+        // 4. EXTRA_BIG_TEXT (expanded message)
         extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim()?.let { text ->
             if (text.isNotBlank() && !isSummaryOrNoise(text)) {
                 results.add(CapturedMessage(sender = defaultSender, text = text, timestamp = sbn.postTime))
+                return results
             }
         }
 
-        // 5. EXTRA_TEXT
+        // 5. EXTRA_TEXT (fallback single-line message)
         extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim()?.let { text ->
             if (text.isNotBlank() && !isSummaryOrNoise(text)) {
                 results.add(CapturedMessage(sender = defaultSender, text = text, timestamp = sbn.postTime))
+                return results
             }
         }
 
@@ -291,7 +350,20 @@ class WhatsAppNotificationListener : NotificationListenerService() {
         private const val TAG = "WhatsAppListener"
         private const val CHANNEL_ID = "vorht_listener"
         private const val NOTIFICATION_ID = 42
-        const val WHATSAPP_PACKAGE = "com.whatsapp"
+
+        val TARGET_PACKAGES = setOf(
+            "com.whatsapp",
+            "com.whatsapp.w4b",
+            "com.google.android.apps.messaging",
+            "com.android.mms",
+            "com.android.mms.service",
+            "com.samsung.android.messaging",
+            "com.hihonor.message",
+            "com.huawei.message",
+            "org.thoughtcrime.securesms",
+            "org.telegram.messenger",
+            "com.facebook.orca",
+        )
 
         private val SUMMARY_ONLY = Regex(
             "(?i)^\\s*\\d+\\s+new\\s+messages?\\s*$" + "|" +

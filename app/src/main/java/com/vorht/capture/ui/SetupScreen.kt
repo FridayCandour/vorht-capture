@@ -100,8 +100,8 @@ fun SetupScreen(
         SetupCard(
             step = "1",
             title = "Notification access",
-            body = "Allows Vorht to read WhatsApp notifications the moment they arrive. " +
-                "Only the com.whatsapp package is monitored, on-device.",
+            body = "Allows Vorht to read SMS and WhatsApp notifications the moment they arrive. " +
+                "Monitored strictly on-device.",
             done = listenerEnabled,
             doneLabel = "Granted",
             actionLabel = "Grant access",

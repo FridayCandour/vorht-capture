@@ -11,6 +11,15 @@
 
     <queries>
         <package android:name="com.whatsapp" />
+        <package android:name="com.whatsapp.w4b" />
+        <package android:name="com.google.android.apps.messaging" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.APP_MESSAGING" />
+        </intent>
+        <intent>
+            <action android:name="android.provider.Telephony.SMS_DELIVER" />
+        </intent>
     </queries>
 
     <application
@@ -45,7 +54,7 @@
             </intent-filter>
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Real-time relay of WhatsApp verification notifications" />
+                android:value="Real-time relay of incoming SMS and WhatsApp verification notifications" />
         </service>
 
         <receiver

@@ -63,15 +63,16 @@ object CaptureDispatcher {
         message: String,
         code: String?,
         detectedAt: Long,
+        source: String = "notification",
     ) {
         init(context)
 
         val now = SystemClock.elapsedRealtime()
         cleanupSeen(now)
 
-        // Global dedup key by sender + content (independent of notification key)
+        // Global dedup key by source + sender + content (independent of notification key)
         // so WhatsApp group summary and individual conversation notifications are unified.
-        val dedupKey = "whatsapp:$sender:${code ?: message.trim()}"
+        val dedupKey = "$source:$sender:${code ?: message.trim()}"
         if (seenEvents.putIfAbsent(dedupKey, now + DEDUP_TTL_MS) != null) {
             VorhtLogger.log(
                 "CAPTURE_DUPLICATE_IGNORED",
