@@ -47,5 +47,13 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Real-time relay of WhatsApp verification notifications" />
         </service>
+
+        <receiver
+            android:name=".capture.TestCaptureReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.vorht.capture.TEST_CAPTURE" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

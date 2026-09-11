@@ -31,7 +31,7 @@ object CaptureDispatcher {
 
     private const val TAG = "CaptureDispatcher"
     private const val DELIVERY_WINDOW_MS = 30_000L
-    private const val DEDUP_TTL_MS = 60_000L
+    private const val DEDUP_TTL_MS = 300_000L // 5 minutes retention to suppress group summary duplicates
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var powerManager: PowerManager? = null
@@ -69,10 +69,16 @@ object CaptureDispatcher {
         val now = SystemClock.elapsedRealtime()
         cleanupSeen(now)
 
-        // Dedup heuristic based on notification key + code / normalized snippet
-        val dedupKey = "${WhatsAppNotificationListener.WHATSAPP_PACKAGE}:$key:${code ?: message.trim().take(64)}"
+        // Global dedup key by sender + content (independent of notification key)
+        // so WhatsApp group summary and individual conversation notifications are unified.
+        val dedupKey = "whatsapp:$sender:${code ?: message.trim()}"
         if (seenEvents.putIfAbsent(dedupKey, now + DEDUP_TTL_MS) != null) {
-            Log.d(TAG, "Duplicate notification event ignored: $dedupKey")
+            VorhtLogger.log(
+                "CAPTURE_DUPLICATE_IGNORED",
+                eventId = eventId,
+                notificationKey = key,
+                details = "sender=\"$sender\" dedupKey=\"$dedupKey\"",
+            )
             return
         }
 

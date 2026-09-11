@@ -19,6 +19,8 @@ import com.vorht.capture.util.CrashReporter
 import com.vorht.capture.util.VorhtLogger
 import java.util.UUID
 
+import androidx.core.app.NotificationCompat
+
 /**
  * Authoritative background entry point for WhatsApp notifications.
  * Operates independently of MainActivity and UI lifecycles.
@@ -47,48 +49,58 @@ class WhatsAppNotificationListener : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        if (sbn.packageName != WHATSAPP_PACKAGE) return
+        val pkg = sbn.packageName
+        if (pkg != WHATSAPP_PACKAGE && pkg != applicationContext.packageName) return
 
         val notification = sbn.notification ?: return
-        // Ongoing notifications are progress bars / uploads, never messages.
-        if (notification.flags and Notification.FLAG_ONGOING_EVENT != 0) return
+        val key = sbn.key ?: "${pkg}|${sbn.id}"
+        val isOngoing = notification.flags and Notification.FLAG_ONGOING_EVENT != 0
+        val isGroupSummary = notification.flags and Notification.FLAG_GROUP_SUMMARY != 0
 
-        val extras = notification.extras ?: return
-        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim()
-        val sender = if (title.isNullOrBlank()) "WhatsApp" else title
+        VorhtLogger.log(
+            "NOTIFICATION_POSTED",
+            notificationKey = key,
+            details = "pkg=$pkg id=${sbn.id} flags=0x${Integer.toHexString(notification.flags)} ongoing=$isOngoing groupSummary=$isGroupSummary postTime=${sbn.postTime}",
+        )
 
-        val texts = extractTexts(extras)
-        if (texts.isEmpty()) return
+        // Ongoing notifications are progress bars / uploads / active calls, never incoming messages.
+        if (isOngoing) return
 
-        val key = sbn.key ?: "${sbn.packageName}|${sbn.id}"
+        val messages = extractMessages(notification, sbn)
+        if (messages.isEmpty()) {
+            VorhtLogger.log(
+                "NOTIFICATION_SKIPPED",
+                notificationKey = key,
+                details = "reason=no_valid_text_found",
+            )
+            return
+        }
+
         VorhtLogger.log(
             "CAPTURE_RECEIVED",
             notificationKey = key,
-            details = "sender=\"$sender\" textCount=${texts.size} postTime=${sbn.postTime}",
+            details = "messageCount=${messages.size} groupSummary=$isGroupSummary",
         )
 
-        for (text in texts) {
-            // Skip progress-style/percentage-only strings.
-            if (text.contains("%") && !text.any { it.isLetterOrDigit() && it != '%' }) continue
-
-            val code = CodeParser.parse(text)
+        for (item in messages) {
+            val code = CodeParser.parse(item.text)
             val eventId = UUID.randomUUID().toString()
 
             VorhtLogger.log(
                 "CAPTURE_PARSED",
                 eventId = eventId,
                 notificationKey = key,
-                details = "code=${code ?: "none"} textLength=${text.length}",
+                details = "sender=\"${item.sender}\" code=${code ?: "none"} textLength=${item.text.length}",
             )
 
             CaptureDispatcher.forward(
                 context = applicationContext,
                 eventId = eventId,
                 key = key,
-                sender = sender,
-                message = text,
+                sender = item.sender,
+                message = item.text,
                 code = code,
-                detectedAt = sbn.postTime,
+                detectedAt = item.timestamp,
             )
         }
     }
@@ -133,30 +145,110 @@ class WhatsAppNotificationListener : NotificationListenerService() {
     }
 
     /**
-     * Every variant of message content WhatsApp may attach, each forwarded
-     * separately. Order matters: lines (stacked messages) first, then big text,
-     * then the plain text.
+     * Extracts individual messages from WhatsApp notifications using all available styles.
+     * Order of precedence:
+     * 1. NotificationCompat.MessagingStyle (standard modern WhatsApp format)
+     * 2. Framework Notification.EXTRA_MESSAGES bundle array
+     * 3. InboxStyle EXTRA_TEXT_LINES (stacked group notifications)
+     * 4. EXTRA_BIG_TEXT
+     * 5. EXTRA_TEXT
      */
-    private fun extractTexts(extras: Bundle): List<String> {
-        val found = LinkedHashSet<String>()
+    private fun extractMessages(notification: Notification, sbn: StatusBarNotification): List<CapturedMessage> {
+        val extras = notification.extras ?: return emptyList()
+        val defaultSender = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim()
+            ?.takeIf { it.isNotBlank() } ?: "WhatsApp"
 
+        val results = mutableListOf<CapturedMessage>()
+
+        // 1. AndroidX NotificationCompat.MessagingStyle
+        try {
+            val messagingStyle = NotificationCompat.MessagingStyle.extractMessagingStyleFromNotification(notification)
+            if (messagingStyle != null && messagingStyle.messages.isNotEmpty()) {
+                for (msg in messagingStyle.messages) {
+                    val text = msg.text?.toString()?.trim() ?: continue
+                    if (text.isBlank() || isSummaryOrNoise(text)) continue
+                    val sender = msg.person?.name?.toString()?.trim()?.takeIf { it.isNotBlank() } ?: defaultSender
+                    val time = if (msg.timestamp > 0L) msg.timestamp else sbn.postTime
+                    results.add(CapturedMessage(sender = sender, text = text, timestamp = time))
+                }
+                if (results.isNotEmpty()) {
+                    return results
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "MessagingStyle extraction failed: ${e.message}")
+        }
+
+        // 2. Framework EXTRA_MESSAGES bundle array
+        try {
+            val rawMessages = extras.getParcelableArray(Notification.EXTRA_MESSAGES)
+            if (!rawMessages.isNullOrEmpty()) {
+                for (item in rawMessages) {
+                    if (item is Bundle) {
+                        val text = item.getCharSequence("text")?.toString()?.trim() ?: continue
+                        if (text.isBlank() || isSummaryOrNoise(text)) continue
+                        val sender = item.getCharSequence("sender")?.toString()?.trim()?.takeIf { it.isNotBlank() } ?: defaultSender
+                        val time = item.getLong("time", sbn.postTime)
+                        results.add(CapturedMessage(sender = sender, text = text, timestamp = time))
+                    }
+                }
+                if (results.isNotEmpty()) {
+                    return results
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "EXTRA_MESSAGES extraction failed: ${e.message}")
+        }
+
+        // 3. InboxStyle EXTRA_TEXT_LINES (for stacked lines / group summary)
         val lines = extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
         if (lines != null) {
             for (line in lines) {
-                line?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let { found.add(it) }
+                val lineStr = line?.toString()?.trim() ?: continue
+                if (lineStr.isBlank() || isSummaryOrNoise(lineStr)) continue
+                val colonIdx = lineStr.indexOf(": ")
+                val (lineSender, lineText) = if (colonIdx in 1..40) {
+                    lineStr.substring(0, colonIdx).trim() to lineStr.substring(colonIdx + 2).trim()
+                } else {
+                    defaultSender to lineStr
+                }
+                if (lineText.isNotBlank() && !isSummaryOrNoise(lineText)) {
+                    results.add(CapturedMessage(sender = lineSender, text = lineText, timestamp = sbn.postTime))
+                }
+            }
+            if (results.isNotEmpty()) {
+                return results
             }
         }
 
-        extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim()
-            ?.takeIf { it.isNotBlank() }?.let { found.add(it) }
+        // 4. EXTRA_BIG_TEXT
+        extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim()?.let { text ->
+            if (text.isNotBlank() && !isSummaryOrNoise(text)) {
+                results.add(CapturedMessage(sender = defaultSender, text = text, timestamp = sbn.postTime))
+            }
+        }
 
-        extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim()
-            ?.takeIf { it.isNotBlank() }?.let { found.add(it) }
+        // 5. EXTRA_TEXT
+        extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim()?.let { text ->
+            if (text.isNotBlank() && !isSummaryOrNoise(text)) {
+                results.add(CapturedMessage(sender = defaultSender, text = text, timestamp = sbn.postTime))
+            }
+        }
 
-        // Drop obvious bundle summaries like "2 new messages" — the real lines
-        // are in TEXT_LINES/BIG_TEXT and are forwarded individually.
-        return found.filter { text -> !SUMMARY_ONLY.matches(text) }
+        return results
     }
+
+    private fun isSummaryOrNoise(text: String): Boolean {
+        if (SUMMARY_ONLY.matches(text)) return true
+        if (text.contains("%") && !text.any { it.isLetterOrDigit() && it != '%' }) return true
+        return false
+    }
+
+    data class CapturedMessage(
+        val sender: String,
+        val text: String,
+        val timestamp: Long,
+    )
 
     companion object {
         private const val TAG = "WhatsAppListener"

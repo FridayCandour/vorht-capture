@@ -2,22 +2,15 @@ package com.vorht.capture.net
 
 import android.os.SystemClock
 import com.google.gson.Gson
-import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.withTimeoutOrNull
-import okhttp3.Call
-import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
-import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
-import kotlin.coroutines.resume
 
 data class DeliveryResult(
     val isSuccess: Boolean,
@@ -70,10 +63,11 @@ object CarlaDelivery {
     }
 
     /**
-     * Executes an asynchronous HTTP POST with strict timeout bounding.
-     * Cancels the underlying OkHttp call if timeoutMs expires or the coroutine is cancelled.
+     * Executes a synchronous HTTP POST with strict socket-level timeout bounding.
+     * Runs directly on the calling thread (e.g. Dispatchers.IO) holding the WakeLock,
+     * without delegating to OkHttp's asynchronous thread pool which can be throttled in sleep.
      */
-    suspend fun send(
+    fun send(
         project: String,
         message: String,
         eventId: String,
@@ -84,63 +78,42 @@ object CarlaDelivery {
         }
 
         val start = SystemClock.elapsedRealtime()
-
-        val result = withTimeoutOrNull(timeoutMs) {
-            suspendCancellableCoroutine { continuation ->
-                val payload = gson.toJson(
-                    mapOf(
-                        "project" to project.take(120),
-                        "message" to message.take(3500),
-                    )
-                )
-                val request = Request.Builder()
-                    .url(VorhtEndpoints.CARLA)
-                    .header("Idempotency-Key", eventId)
-                    .post(payload.toRequestBody(json))
-                    .build()
-
-                val call = client.newCall(request)
-                continuation.invokeOnCancellation {
-                    call.cancel()
-                }
-
-                call.enqueue(object : Callback {
-                    override fun onResponse(call: Call, response: Response) {
-                        response.use {
-                            val duration = SystemClock.elapsedRealtime() - start
-                            val success = response.isSuccessful || response.code == 409
-                            if (continuation.isActive) {
-                                continuation.resume(
-                                    DeliveryResult(
-                                        isSuccess = success,
-                                        statusCode = response.code,
-                                        durationMs = duration,
-                                    )
-                                )
-                            }
-                        }
-                    }
-
-                    override fun onFailure(call: Call, e: IOException) {
-                        val duration = SystemClock.elapsedRealtime() - start
-                        if (continuation.isActive) {
-                            continuation.resume(
-                                DeliveryResult(
-                                    isSuccess = false,
-                                    errorMessage = e.message ?: e.javaClass.simpleName,
-                                    durationMs = duration,
-                                )
-                            )
-                        }
-                    }
-                })
-            }
-        }
-
-        return result ?: DeliveryResult(
-            isSuccess = false,
-            errorMessage = "Timed out after ${timeoutMs}ms",
-            durationMs = SystemClock.elapsedRealtime() - start,
+        val payload = gson.toJson(
+            mapOf(
+                "project" to project.take(120),
+                "message" to message.take(3500),
+            )
         )
+        val request = Request.Builder()
+            .url(VorhtEndpoints.CARLA)
+            .header("Idempotency-Key", eventId)
+            .post(payload.toRequestBody(json))
+            .build()
+
+        val callClient = client.newBuilder()
+            .callTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .connectTimeout(minOf(timeoutMs, 5000L), TimeUnit.MILLISECONDS)
+            .readTimeout(minOf(timeoutMs, 10000L), TimeUnit.MILLISECONDS)
+            .writeTimeout(minOf(timeoutMs, 10000L), TimeUnit.MILLISECONDS)
+            .build()
+
+        return try {
+            callClient.newCall(request).execute().use { response ->
+                val duration = SystemClock.elapsedRealtime() - start
+                val success = response.isSuccessful || response.code == 409
+                DeliveryResult(
+                    isSuccess = success,
+                    statusCode = response.code,
+                    durationMs = duration,
+                )
+            }
+        } catch (e: Exception) {
+            val duration = SystemClock.elapsedRealtime() - start
+            DeliveryResult(
+                isSuccess = false,
+                errorMessage = e.message ?: e.javaClass.simpleName,
+                durationMs = duration,
+            )
+        }
     }
 }
