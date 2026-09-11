@@ -79,9 +79,10 @@ fun StatusScreen() {
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            "Nothing is stored on this phone — no logs, no history. The listener " +
-                "stays awake in the background (foreground service + wake lock) and " +
-                "forwards each message the moment it arrives, even when locked.",
+            "Nothing is stored on this phone — no logs, no queue. Messages are " +
+                "captured immediately, delivered via HTTP, and retried for up to 30 " +
+                "seconds while the process is alive. Stale messages not delivered within " +
+                "that 30-second window are intentionally discarded.",
             style = MaterialTheme.typography.bodyMedium,
             color = VorhtColors.Whiteout.copy(alpha = 0.7f),
         )

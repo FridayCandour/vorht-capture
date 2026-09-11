@@ -4,10 +4,7 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
-    <!-- Foreground "listening" service + wake lock: capture must survive lock screen -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <queries>
@@ -33,24 +30,16 @@
         </activity>
 
         <!-- Core of the app: captures WhatsApp notifications and forwards each one
-             instantly. Runs as a foreground service with a wake lock so the phone
-             can lock or doze without interrupting capture.
-             exported=true: the system binds directly (guarded by the system-only
-             BIND_NOTIFICATION_LISTENER_SERVICE permission). Some OEM ROMs grey out
-             the toggle for non-exported listener services. -->
+             instantly. System binds directly (guarded by BIND_NOTIFICATION_LISTENER_SERVICE).
+             Some OEM ROMs grey out the toggle for non-exported listener services. -->
         <service
             android:name=".capture.WhatsAppNotificationListener"
             android:exported="true"
-            android:foregroundServiceType="specialUse"
             android:label="@string/app_name"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
-            <!-- Declares why the specialUse foreground type is needed (Play policy). -->
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Real-time relay of WhatsApp verification notifications" />
         </service>
     </application>
 </manifest>

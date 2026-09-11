@@ -6,28 +6,26 @@ Android app that captures WhatsApp verification messages from system notificatio
 ## Stack
 
 - **Kotlin + Jetpack Compose (Material 3)** — dark-first UI matching the repo style reference
-- **Room/SQLite** — every captured event is persisted *before* any upload is attempted
-- **WorkManager** — background upload with exponential backoff, network-constrained
-- **Retrofit + OkHttp + Gson** — PRD API contract
-- **NotificationListenerService** — monitors `com.whatsapp` notifications only
-- `compileSdk = targetSdk = 36` (Android 16), `minSdk = 26`
+- **NotificationListenerService** — system-bound service monitoring `com.whatsapp` notifications only
+- **OkHttp + Gson** — non-blocking coroutine HTTP transport with strict per-attempt timeout bounding
+- **compileSdk = targetSdk = 36** (Android 16), `minSdk = 26`
 
-## Reliability model
+## Delivery & Reliability Model
 
-| Requirement | Implementation |
+| Property | Implementation |
 |---|---|
-| Never lose an event when internet drops | Event written to Room first; WorkManager drains the queue only with a network |
-| Idempotent uploads | `Idempotency-Key: <event_id>` (UUID) on every request; server duplicate = success |
-| Never process the same notification twice | Unique index on `notificationKey` + `INSERT IGNORE` dedup |
-| Statuses | `PENDING`, `SENT`, `FAILED`, `REVIEW` |
-| Offline queueing | Continues capturing; `Sync now` + automatic retries |
-| Manual review | Review tab: unrecognized messages, editable code, one-tap retry |
+| Delivery Semantics | Ephemeral, immediate HTTP attempt; rapid retries (1s, 2s, 3s, 5s) within a 30s freshness window |
+| Strict 30s TTL | Events not delivered within 30 seconds are intentionally discarded (no stale OTP delivery) |
+| Idempotency | `Idempotency-Key: <event_id>` (UUID) on every request; HTTP 2xx or 409 = success |
+| In-Memory Dedup | Dedup heuristic on `(packageName + notificationKey + code/message)` to ignore redundant updates |
+| No Deferrable Queue | No Room delivery queue and no WorkManager; state is held in-memory during active attempt |
 
 ## API
 
 All delivery goes to the Vorht ops relay — **no localhost, no user-configured endpoints**:
 
 `POST https://carla.codedynasty.dev`
+`Headers: Idempotency-Key: <event_id>`
 
 ```json
 {
@@ -37,9 +35,7 @@ All delivery goes to the Vorht ops relay — **no localhost, no user-configured 
 ```
 
 - Crash reports and non-fatal errors use the same relay (`project: "vorht-capture"`).
-- Any HTTP 2xx counts as delivered; failures stay queued in Room and are retried
-  by WorkManager with exponential backoff (network-constrained), so an internet
-  drop never loses an event.
+- HTTP 2xx or 409 counts as delivered. Failed attempts retry with backoff strictly within the 30s window.
 
 ## Building the APK locally
 
