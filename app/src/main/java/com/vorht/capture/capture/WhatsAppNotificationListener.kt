@@ -19,6 +19,7 @@ import com.vorht.capture.util.CrashReporter
 import com.vorht.capture.util.VorhtLogger
 import java.util.UUID
 
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 
 /**
@@ -26,6 +27,8 @@ import androidx.core.app.NotificationCompat
  * Operates independently of MainActivity and UI lifecycles.
  */
 class WhatsAppNotificationListener : NotificationListenerService() {
+
+    private var serviceWakeLock: PowerManager.WakeLock? = null
 
     override fun onListenerConnected() {
         super.onListenerConnected()
@@ -37,6 +40,7 @@ class WhatsAppNotificationListener : NotificationListenerService() {
 
     override fun onListenerDisconnected() {
         super.onListenerDisconnected()
+        releaseResidentWakeLock()
         VorhtLogger.log("LISTENER_DISCONNECTED", details = "system unbound listener")
         CrashReporter.report("listener DISCONNECTED — attempting rebind now")
 
@@ -46,6 +50,11 @@ class WhatsAppNotificationListener : NotificationListenerService() {
         } catch (e: Exception) {
             CrashReporter.report("requestRebind failed: ${e.message}")
         }
+    }
+
+    override fun onDestroy() {
+        releaseResidentWakeLock()
+        super.onDestroy()
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
@@ -137,10 +146,38 @@ class WhatsAppNotificationListener : NotificationListenerService() {
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
+            acquireResidentWakeLock()
             Log.i(TAG, "Promoted to foreground service successfully")
         } catch (e: Exception) {
             Log.w(TAG, "startForeground failed: ${e.message}", e)
             CrashReporter.report("startForeground failed: ${e.message}")
+        }
+    }
+
+    private fun acquireResidentWakeLock() {
+        if (serviceWakeLock?.isHeld == true) return
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            serviceWakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "vorht:service:resident")?.apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+            VorhtLogger.log("WAKELOCK_ACQUIRED", details = "resident service wakelock active")
+            Log.i(TAG, "Acquired resident PARTIAL_WAKE_LOCK")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to acquire resident service wakelock: ${e.message}")
+        }
+    }
+
+    private fun releaseResidentWakeLock() {
+        try {
+            serviceWakeLock?.let {
+                if (it.isHeld) it.release()
+            }
+            VorhtLogger.log("WAKELOCK_RELEASED", details = "resident service wakelock released")
+            Log.i(TAG, "Released resident PARTIAL_WAKE_LOCK")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to release resident service wakelock: ${e.message}")
         }
     }
 
