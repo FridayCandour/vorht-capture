@@ -43,24 +43,21 @@ object CarlaDelivery {
 
     fun formatMessage(
         sender: String,
-        code: String?,
-        detectedAt: Long,
-        eventId: String,
         text: String,
     ): String {
-        val isoTime = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
-            timeZone = TimeZone.getTimeZone("UTC")
-        }.format(Date(detectedAt))
-
         return buildString {
-            appendLine("VORHT CAPTURE")
             appendLine("From: $sender")
-            appendLine("Code: ${code ?: "NONE"}")
-            appendLine("At: $isoTime")
-            appendLine("Event: $eventId")
-            append("Text: $text")
+            append("Message: $text")
         }
     }
+
+    fun formatMessage(
+        sender: String,
+        code: String? = null,
+        detectedAt: Long = 0L,
+        eventId: String? = null,
+        text: String,
+    ): String = formatMessage(sender = sender, text = text)
 
     /**
      * Executes a synchronous HTTP POST with strict socket-level timeout bounding.

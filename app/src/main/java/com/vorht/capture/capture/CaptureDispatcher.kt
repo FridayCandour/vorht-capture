@@ -111,9 +111,6 @@ object CaptureDispatcher {
 
             val formattedMessage = CarlaDelivery.formatMessage(
                 sender = sender,
-                code = code,
-                detectedAt = detectedAt,
-                eventId = eventId,
                 text = message,
             )
 

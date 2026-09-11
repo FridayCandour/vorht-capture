@@ -37,16 +37,14 @@ class CaptureTests {
     fun testCarlaMessageFormatting() {
         val formatted = CarlaDelivery.formatMessage(
             sender = "John Doe",
-            code = "BIRTH123",
-            detectedAt = 1726000000000L,
-            eventId = "test-uuid-1234",
             text = "Your verification code is BIRTH123",
         )
         assertNotNull(formatted)
-        assertTrue(formatted.startsWith("VORHT CAPTURE"))
         assertTrue(formatted.contains("From: John Doe"))
-        assertTrue(formatted.contains("Code: BIRTH123"))
-        assertTrue(formatted.contains("Event: test-uuid-1234"))
-        assertTrue(formatted.contains("Text: Your verification code is BIRTH123"))
+        assertTrue(formatted.contains("Message: Your verification code is BIRTH123"))
+        org.junit.Assert.assertFalse(formatted.contains("VORHT CAPTURE"))
+        org.junit.Assert.assertFalse(formatted.contains("Code:"))
+        org.junit.Assert.assertFalse(formatted.contains("At:"))
+        org.junit.Assert.assertFalse(formatted.contains("Event:"))
     }
 }
