@@ -5,6 +5,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <queries>
@@ -30,16 +32,20 @@
         </activity>
 
         <!-- Core of the app: captures WhatsApp notifications and forwards each one
-             instantly. System binds directly (guarded by BIND_NOTIFICATION_LISTENER_SERVICE).
-             Some OEM ROMs grey out the toggle for non-exported listener services. -->
+             instantly. Runs as a foreground service so the OS does not freeze the process
+             or block background networking while the device is locked. -->
         <service
             android:name=".capture.WhatsAppNotificationListener"
             android:exported="true"
+            android:foregroundServiceType="specialUse"
             android:label="@string/app_name"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Real-time relay of WhatsApp verification notifications" />
         </service>
     </application>
 </manifest>

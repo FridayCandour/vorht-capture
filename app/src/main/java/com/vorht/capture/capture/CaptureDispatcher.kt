@@ -1,6 +1,7 @@
 package com.vorht.capture.capture
 
 import android.content.Context
+import android.os.PowerManager
 import android.os.SystemClock
 import android.util.Log
 import com.vorht.capture.net.CarlaDelivery
@@ -19,6 +20,7 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Ephemeral realtime delivery dispatcher:
  *  - Captures notifications immediately
+ *  - Holds a scoped WakeLock so CPU does not sleep during background delivery
  *  - Attempts HTTP POST immediately
  *  - Retries with rapid backoff within a 30-second freshness window while app process is alive
  *  - Discards events when 30s TTL expires
@@ -32,6 +34,7 @@ object CaptureDispatcher {
     private const val DEDUP_TTL_MS = 60_000L
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var powerManager: PowerManager? = null
 
     private val _forwarded = MutableStateFlow(0)
     val forwarded: StateFlow<Int> = _forwarded.asStateFlow()
@@ -42,9 +45,8 @@ object CaptureDispatcher {
     // Dedup cache: dedupKey -> expireAtElapsedRealtime
     private val seenEvents = ConcurrentHashMap<String, Long>()
 
-    @Suppress("UNUSED_PARAMETER")
     fun init(context: Context) {
-        // App lifecycle initialization hook
+        powerManager = context.applicationContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
     }
 
     /**
@@ -71,6 +73,16 @@ object CaptureDispatcher {
         _pending.update { it + 1 }
 
         scope.launch {
+            val wakeLock = try {
+                powerManager?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "vorht:delivery:$eventId")?.apply {
+                    setReferenceCounted(false)
+                    acquire(35_000L) // Capped safety window
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "WakeLock acquisition failed: ${e.message}")
+                null
+            }
+
             val deadline = SystemClock.elapsedRealtime() + DELIVERY_WINDOW_MS
             var attempt = 0
             var delivered = false
@@ -113,6 +125,12 @@ object CaptureDispatcher {
                 Log.w(TAG, "Delivery loop error for $eventId: ${e.message}")
             } finally {
                 _pending.update { (it - 1).coerceAtLeast(0) }
+                try {
+                    wakeLock?.let { if (it.isHeld) it.release() }
+                } catch (e: Exception) {
+                    Log.w(TAG, "WakeLock release error: ${e.message}")
+                }
+
                 if (delivered) {
                     _forwarded.update { it + 1 }
                     Log.i(TAG, "Delivered event $eventId in $attempt attempt(s)")
